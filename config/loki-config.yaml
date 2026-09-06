@@ -1,0 +1,106 @@
+# Monolithic single-binary Loki with filesystem storage.
+# Limits are deliberately raised so the benchmark measures Loki's engine,
+# not its default rate limiters.
+auth_enabled: false
+
+server:
+  http_listen_port: 3100
+  grpc_listen_port: 9096
+  log_level: warn
+  http_server_read_timeout: 10m
+  http_server_write_timeout: 10m
+  grpc_server_max_recv_msg_size: 209715200
+  grpc_server_max_send_msg_size: 209715200
+
+common:
+  instance_addr: 127.0.0.1
+  path_prefix: /loki
+  storage:
+    filesystem:
+      chunks_directory: /loki/chunks
+      rules_directory: /loki/rules
+  replication_factor: 1
+  ring:
+    kvstore:
+      store: inmemory
+
+schema_config:
+  configs:
+    - from: 2020-01-01
+      store: tsdb
+      object_store: filesystem
+      schema: v13
+      index:
+        prefix: index_
+        period: 24h
+
+storage_config:
+  tsdb_shipper:
+    active_index_directory: /loki/tsdb-index
+    cache_location: /loki/tsdb-cache
+  filesystem:
+    directory: /loki/chunks
+
+compactor:
+  working_directory: /loki/compactor
+  retention_enabled: false
+  delete_request_store: filesystem
+
+ingester:
+  chunk_idle_period: 30m
+  chunk_target_size: 1572864
+  max_chunk_age: 12h
+  chunk_encoding: snappy
+  wal:
+    enabled: true
+    dir: /loki/wal
+
+limits_config:
+  # ingest
+  ingestion_rate_mb: 2048
+  ingestion_burst_size_mb: 4096
+  per_stream_rate_limit: 512MB
+  per_stream_rate_limit_burst: 1024MB
+  max_line_size: 1MB
+  max_streams_per_user: 0
+  max_global_streams_per_user: 0
+  reject_old_samples: false
+  reject_old_samples_max_age: 8760h
+  creation_grace_period: 24h
+  # query
+  max_query_length: 0s
+  max_query_lookback: 0s
+  max_query_series: 100000
+  max_query_parallelism: 32
+  max_entries_limit_per_query: 1000000
+  query_timeout: 10m
+  split_queries_by_interval: 1h
+  volume_enabled: true
+  allow_structured_metadata: true
+  discover_service_name: []
+  discover_log_levels: false
+
+querier:
+  max_concurrent: 16
+
+frontend:
+  max_outstanding_per_tenant: 8192
+  compress_responses: true
+
+query_range:
+  align_queries_with_step: false
+  cache_results: false
+
+ruler:
+  storage:
+    type: local
+    local:
+      directory: /loki/rules
+  rule_path: /loki/rules-tmp
+  ring:
+    kvstore:
+      store: inmemory
+  enable_api: true
+
+analytics:
+  reporting_enabled: false

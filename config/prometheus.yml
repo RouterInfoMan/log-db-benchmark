@@ -1,0 +1,30 @@
+global:
+  scrape_interval: 5s
+  evaluation_interval: 15s
+  external_labels:
+    rig: logdb-bench
+
+scrape_configs:
+  # CPU / RAM / disk / IO for every container under test
+  - job_name: bench-exporter
+    static_configs:
+      - targets: ['bench-exporter:9101']
+
+  # Query latencies + ingest throughput pushed by the benchmark runner
+  - job_name: pushgateway
+    honor_labels: true
+    static_configs:
+      - targets: ['pushgateway:9091']
+
+  # Each database's own internal metrics, for drill-down
+  - job_name: victorialogs
+    static_configs:
+      - targets: ['victorialogs:9428']
+
+  - job_name: loki
+    static_configs:
+      - targets: ['loki:3100']
+
+  - job_name: prometheus
+    static_configs:
+      - targets: ['localhost:9090']

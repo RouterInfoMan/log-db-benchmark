@@ -1,0 +1,153 @@
+name: logdb-bench
+
+x-db-limits: &db-limits
+  mem_limit: ${DB_MEM_LIMIT:-3g}
+  cpus: ${DB_CPUS:-4}
+  restart: unless-stopped
+  networks: [bench]
+
+services:
+  # ------------------------------------------------------------------ #
+  #  Systems under test                                                 #
+  # ------------------------------------------------------------------ #
+  elasticsearch:
+    <<: *db-limits
+    image: ${ES_IMAGE}
+    container_name: bench-elasticsearch
+    environment:
+      - discovery.type=single-node
+      - xpack.security.enabled=false
+      - xpack.security.enrollment.enabled=false
+      - xpack.ml.enabled=false
+      - bootstrap.memory_lock=false
+      - ES_JAVA_OPTS=-Xms${ES_HEAP:-1536m} -Xmx${ES_HEAP:-1536m}
+      - cluster.routing.allocation.disk.threshold_enabled=false
+      - action.destructive_requires_name=false
+      - ingest.geoip.downloader.enabled=false
+    ulimits:
+      nofile: {soft: 65536, hard: 65536}
+    volumes:
+      - ./data/elasticsearch:/usr/share/elasticsearch/data
+    ports: ["${ES_PORT:-9200}:9200"]
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:9200/_cluster/health | grep -qE '\"status\":\"(green|yellow)\"'"]
+      interval: 5s
+      timeout: 5s
+      retries: 60
+      start_period: 30s
+
+  loki:
+    <<: *db-limits
+    image: ${LOKI_IMAGE}
+    container_name: bench-loki
+    user: "0:0"
+    command: ["-config.file=/etc/loki/loki-config.yaml"]
+    volumes:
+      - ./config/loki-config.yaml:/etc/loki/loki-config.yaml:ro
+      - ./data/loki:/loki
+    ports: ["${LOKI_PORT:-3100}:3100"]
+    # No healthcheck: this image is distroless, so Docker has no shell to run one
+    # in. The harness polls /ready over HTTP instead (bench/targets.py).
+
+  victorialogs:
+    <<: *db-limits
+    image: ${VL_IMAGE}
+    container_name: bench-victorialogs
+    user: "0:0"
+    command:
+      - -storageDataPath=/vlogs
+      - -httpListenAddr=:9428
+      - -retentionPeriod=10y
+      - -loggerLevel=WARN
+      - -search.maxQueryDuration=10m
+      - -insert.maxLineSizeBytes=1MB
+    volumes:
+      - ./data/victorialogs:/vlogs
+    ports: ["${VL_PORT:-9428}:9428"]
+    # No healthcheck: distroless image, same as Loki above.
+
+  # ------------------------------------------------------------------ #
+  #  Measurement + observability                                        #
+  # ------------------------------------------------------------------ #
+  # Samples CPU / RAM / net / block-IO from the Docker API and on-disk
+  # footprint from the bind-mounted data dirs. One uniform source of
+  # truth for all three databases.
+  bench-exporter:
+    build: ./exporter
+    image: logdb-bench/exporter:latest
+    container_name: bench-exporter
+    restart: unless-stopped
+    networks: [bench]
+    environment:
+      - SCRAPE_INTERVAL=1
+      - DISK_INTERVAL=10
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - ./data:/benchdata:ro
+    ports: ["${EXPORTER_PORT:-9101}:9101"]
+    healthcheck:
+      test: ["CMD-SHELL", "python3 -c \"import urllib.request;urllib.request.urlopen('http://localhost:9101/metrics').read()\""]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  pushgateway:
+    image: ${PUSHGATEWAY_IMAGE}
+    container_name: bench-pushgateway
+    restart: unless-stopped
+    networks: [bench]
+    ports: ["${PUSHGATEWAY_PORT:-9091}:9091"]
+
+  prometheus:
+    image: ${PROM_IMAGE}
+    container_name: bench-prometheus
+    restart: unless-stopped
+    networks: [bench]
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --storage.tsdb.retention.time=30d
+      - --web.enable-lifecycle
+    volumes:
+      - ./config/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./data/prometheus:/prometheus
+    ports: ["${PROM_PORT:-9090}:9090"]
+
+  grafana:
+    image: ${GRAFANA_IMAGE}
+    container_name: bench-grafana
+    restart: unless-stopped
+    networks: [bench]
+    environment:
+      - GF_SECURITY_ADMIN_USER=admin
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+      - GF_AUTH_ANONYMOUS_ENABLED=true
+      - GF_AUTH_ANONYMOUS_ORG_ROLE=Admin
+      - GF_USERS_DEFAULT_THEME=dark
+      - GF_INSTALL_PLUGINS=victoriametrics-logs-datasource
+      - GF_FEATURE_TOGGLES_ENABLE=publicDashboards
+      - GF_RENDERING_SERVER_URL=http://renderer:8081/render
+      - GF_RENDERING_CALLBACK_URL=http://grafana:3000/
+    volumes:
+      - ./config/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./config/grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - ./data/grafana:/var/lib/grafana
+    ports: ["${GRAFANA_PORT:-3000}:3000"]
+    depends_on: [prometheus]
+
+  # Optional: renders dashboard panels to PNG.
+  #   docker compose --profile render up -d renderer
+  # Enables "Share > Export as image" in Grafana and the scripts/snapshot.sh helper.
+  renderer:
+    image: grafana/grafana-image-renderer:3.11.6
+    container_name: bench-renderer
+    restart: unless-stopped
+    networks: [bench]
+    profiles: [render]
+    environment:
+      - ENABLE_METRICS=true
+      - RENDERING_MODE=default
+
+networks:
+  bench:
+    name: logdb-bench
